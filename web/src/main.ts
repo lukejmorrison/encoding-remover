@@ -85,15 +85,61 @@ function highlight(text: string, q: string): string {
   return `${before}<mark class="mark">${match}</mark>${after}`;
 }
 
-function brandBar(extra = ""): string {
+type MenuView = "home" | "drug" | "plain";
+
+function menuButton(
+  action: string,
+  label: string,
+  icon: string,
+  opts: { current?: boolean; disabled?: boolean; badge?: string } = {},
+): string {
+  const current = opts.current ? " is-current" : "";
+  const disabled = opts.disabled ? "disabled" : "";
+  const badge = opts.badge
+    ? `<span class="menu-badge">${escapeHtml(opts.badge)}</span>`
+    : "";
   return `
-    <header class="brand-bar">
-      <div>
-        <p class="brand">Encoding<span>Remover</span></p>
-        <p class="tagline">Decoded VigiAccess captures — searchable ADRs, offline-ready, exportable by drug.</p>
-      </div>
-      <p class="install-hint">${extra || "Install from your browser for offline access."}</p>
-    </header>
+    <button type="button" class="menu-item${current}" data-menu="${action}" ${disabled}>
+      <span class="menu-icon" aria-hidden="true">${icon}</span>
+      <span class="menu-label">${label}</span>
+      ${badge}
+    </button>`;
+}
+
+function appMenu(view: MenuView): string {
+  if (view === "plain") return "";
+  const locked = controlsLocked();
+  const selectedCount = selectedSlugs.size;
+  const icon = (path: string) =>
+    `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
+  return `
+    <nav class="app-menu" aria-label="Primary">
+      ${menuButton("home", "Drugs", icon('<path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z"/>'), { current: view === "home", disabled: locked })}
+      ${menuButton("add", "Add", icon('<path d="M12 5v14M5 12h14"/>'), { disabled: locked })}
+      ${menuButton("export-selected", "Export", icon('<path d="M12 3v12M7 11l5 5 5-5M5 21h14"/>'), { disabled: locked || selectedCount === 0, badge: selectedCount ? String(selectedCount) : "" })}
+      ${menuButton("export-all", "All ZIPs", icon('<path d="M4 7h16v12H4zM8 7V5h8v2"/>'), { disabled: locked })}
+      ${
+        view === "drug"
+          ? menuButton("export-drug", "This ZIP", icon('<path d="M7 3h7l5 5v13H7zM14 3v5h5"/>'), { disabled: locked })
+          : ""
+      }
+    </nav>
+    <p id="menu-status" class="menu-status" role="status"></p>
+  `;
+}
+
+function brandBar(extra = "", view: MenuView = "home"): string {
+  return `
+    <div class="top-shell">
+      <header class="brand-bar">
+        <div class="brand-lockup">
+          <p class="brand">Encoding<span>Remover</span></p>
+          <p class="tagline">Decoded VigiAccess captures — searchable ADRs, offline-ready, exportable by drug.</p>
+        </div>
+        <p class="install-hint">${extra || "Install from your browser for offline access."}</p>
+      </header>
+      ${appMenu(view)}
+    </div>
   `;
 }
 
@@ -239,11 +285,7 @@ function exportBar(catalogCount: number): string {
         Select shown
       </label>
       <span class="export-count" id="export-count">${countLabel}</span>
-      <div class="export-actions">
-        <button class="primary" type="button" id="export-selected" ${locked || selectedCount === 0 ? "disabled" : ""}>Export as ZIP</button>
-        <button class="ghost" type="button" id="export-all-zips" ${locked}>Download all ZIPs</button>
-      </div>
-      <p class="export-help">Download every drug ZIP in one archive, or tick drugs and export them as folders inside a single ZIP.</p>
+      <p class="export-help">Tick the drugs you want. Export and All ZIPs are in the menu.</p>
       <p id="export-status" class="export-status"></p>
     </div>
   `;
@@ -268,8 +310,14 @@ function syncSelectionUi(visibleSlugs: string[]): void {
     const n = selectedSlugs.size;
     count.textContent = n === 1 ? "1 selected" : `${n} selected`;
   }
-  const selectedBtn = app!.querySelector<HTMLButtonElement>("#export-selected");
-  if (selectedBtn && !exportBusy) selectedBtn.disabled = selectedSlugs.size === 0 || ingestBusy;
+  const selectedBtn = app!.querySelector<HTMLButtonElement>('[data-menu="export-selected"]');
+  if (selectedBtn && !exportBusy) {
+    selectedBtn.disabled = selectedSlugs.size === 0 || ingestBusy;
+    const badge = selectedBtn.querySelector(".menu-badge");
+    if (selectedSlugs.size === 0) badge?.remove();
+    else if (badge) badge.textContent = String(selectedSlugs.size);
+    else selectedBtn.insertAdjacentHTML("beforeend", `<span class="menu-badge">${selectedSlugs.size}</span>`);
+  }
 }
 
 function setCatalogLocked(locked: boolean): void {
@@ -279,7 +327,7 @@ function setCatalogLocked(locked: boolean): void {
     el.disabled = locked;
   });
   app!.querySelectorAll<HTMLButtonElement>(
-    ".drug-open, #export-selected, #export-all-zips, #add-drug-form button",
+    ".drug-open, .menu-item, #export-zip, #add-drug-form button",
   ).forEach((el) => {
     el.disabled = locked;
   });
@@ -317,63 +365,96 @@ function wireCatalogExport(catalog: Catalog): void {
     syncSelectionUi(visibleSlugs);
   });
 
-  const statusEl = app!.querySelector<HTMLParagraphElement>("#export-status");
+  wireMenu(catalog, null);
+}
 
-  const run = async (
-    button: HTMLButtonElement,
-    idleLabel: string,
-    drugs: CatalogDrug[],
-    pack: (entries: ZipEntry[], onProgress: (done: number, total: number) => void) => Promise<Blob>,
-    filename: string,
-  ) => {
-    if (exportBusy || ingestBusy || drugs.length === 0) return;
-    exportBusy = true;
-    setCatalogLocked(true);
-    button.disabled = true;
-    button.textContent = "Loading…";
-    if (statusEl) statusEl.textContent = "";
-    try {
-      const entries = await loadZipEntries(drugs);
-      const blob = await pack(entries, (done, total) => {
-        button.textContent = `Packing ${done}/${total}…`;
-      });
-      downloadBlob(blob, filename);
-    } catch (err) {
-      if (statusEl) {
-        statusEl.textContent = err instanceof Error ? err.message : String(err);
-      }
-    } finally {
-      exportBusy = false;
-      button.textContent = idleLabel;
-      setCatalogLocked(false);
-      syncSelectionUi(visibleSlugs);
-    }
+function wireMenu(
+  catalog: Catalog | null,
+  exportCurrent: (() => Promise<void>) | null,
+): void {
+  const statusEl = app!.querySelector<HTMLParagraphElement>("#menu-status");
+  const setStatus = (text: string) => {
+    if (statusEl) statusEl.textContent = text;
   };
 
-  const selectedBtn = app!.querySelector<HTMLButtonElement>("#export-selected");
-  selectedBtn?.addEventListener("click", () => {
-    if (!selectedBtn) return;
-    const drugs = catalog.drugs.filter((drug) => selectedSlugs.has(drug.slug));
-    void run(
-      selectedBtn,
-      "Export as ZIP",
-      drugs,
-      (entries) => exportSelectedFolders(entries),
-      "vigiaccess-export.zip",
-    );
+  app!.querySelectorAll<HTMLButtonElement>("[data-menu]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.menu;
+      if (action === "home") {
+        setRoute({ view: "home", q: "" });
+        void renderHome("");
+        return;
+      }
+      if (action === "add") {
+        const input = app!.querySelector<HTMLInputElement>("#add-drug-input");
+        if (input) {
+          input.scrollIntoView({ block: "center" });
+          input.focus();
+          return;
+        }
+        setRoute({ view: "home", q: "" });
+        void renderHome("").then(() => {
+          const next = app!.querySelector<HTMLInputElement>("#add-drug-input");
+          next?.scrollIntoView({ block: "center" });
+          next?.focus();
+        });
+        return;
+      }
+      if (action === "export-selected" || action === "export-all") {
+        if (!catalog) return;
+        const drugs =
+          action === "export-all"
+            ? catalog.drugs
+            : catalog.drugs.filter((drug) => selectedSlugs.has(drug.slug));
+        void runBulkExport(
+          button,
+          action === "export-all" ? "All ZIPs" : "Export",
+          drugs,
+          action === "export-all"
+            ? (entries, onProgress) => exportAllZips(entries, onProgress)
+            : (entries) => exportSelectedFolders(entries),
+          action === "export-all" ? "vigiaccess-all-zips.zip" : "vigiaccess-export.zip",
+          setStatus,
+        );
+        return;
+      }
+      if (action === "export-drug") void exportCurrent?.();
+    });
   });
+}
 
-  const allBtn = app!.querySelector<HTMLButtonElement>("#export-all-zips");
-  allBtn?.addEventListener("click", () => {
-    if (!allBtn) return;
-    void run(
-      allBtn,
-      "Download all ZIPs",
-      catalog.drugs,
-      (entries, onProgress) => exportAllZips(entries, onProgress),
-      "vigiaccess-all-zips.zip",
-    );
-  });
+async function runBulkExport(
+  button: HTMLButtonElement,
+  idleLabel: string,
+  drugs: CatalogDrug[],
+  pack: (entries: ZipEntry[], onProgress: (done: number, total: number) => void) => Promise<Blob>,
+  filename: string,
+  setStatus: (text: string) => void,
+): Promise<void> {
+  if (exportBusy || ingestBusy || drugs.length === 0) return;
+  exportBusy = true;
+  setCatalogLocked(true);
+  button.disabled = true;
+  setStatus("Loading…");
+  try {
+    const entries = await loadZipEntries(drugs);
+    const blob = await pack(entries, (done, total) => {
+      setStatus(`Packing ${done}/${total}…`);
+    });
+    downloadBlob(blob, filename);
+    setStatus("");
+  } catch (err) {
+    setStatus(err instanceof Error ? err.message : String(err));
+  } finally {
+    exportBusy = false;
+    const label = button.querySelector(".menu-label");
+    if (label) label.textContent = idleLabel;
+    setCatalogLocked(false);
+    const visible = [
+      ...app!.querySelectorAll<HTMLInputElement>(".drug-check"),
+    ].map((el) => el.dataset.slug ?? "");
+    syncSelectionUi(visible);
+  }
 }
 
 async function renderHome(q: string): Promise<void> {
@@ -443,7 +524,7 @@ async function renderDrug(slug: string, q: string): Promise<void> {
     const meta = catalog.drugs.find((d) => d.slug === slug);
     if (!meta) throw new Error(`Unknown drug slug: ${slug}`);
     const data = await getDrug(meta.file);
-    paintDrug(meta, data, q);
+    paintDrug(meta, data, q, catalog);
   } catch (err) {
     app!.innerHTML = `
       ${brandBar()}
@@ -457,10 +538,10 @@ async function renderDrug(slug: string, q: string): Promise<void> {
   }
 }
 
-function paintDrug(meta: CatalogDrug, data: DrugCapture, q: string): void {
+function paintDrug(meta: CatalogDrug, data: DrugCapture, q: string, catalog: Catalog): void {
   const filtered = filterReactions(data.reactions, q);
   app!.innerHTML = `
-    ${brandBar(`Dataset ${escapeHtml(data.dataset_date)}`)}
+    ${brandBar(`Dataset ${escapeHtml(data.dataset_date)}`, "drug")}
     <div class="back-row">
       <button class="ghost" id="back-home">← All drugs</button>
       <button class="primary" id="export-zip">Export ZIP</button>
@@ -549,18 +630,33 @@ function paintDrug(meta: CatalogDrug, data: DrugCapture, q: string): void {
     void renderHome("");
   });
 
-  const exportBtn = app!.querySelector<HTMLButtonElement>("#export-zip");
-  exportBtn?.addEventListener("click", async () => {
-    exportBtn.disabled = true;
-    exportBtn.textContent = "Packing…";
+  const exportThisDrug = async () => {
+    if (exportBusy) return;
+    exportBusy = true;
+    setCatalogLocked(true);
+    const statusEl = app!.querySelector<HTMLParagraphElement>("#menu-status");
+    if (statusEl) statusEl.textContent = "Packing…";
+    const exportBtn = app!.querySelector<HTMLButtonElement>("#export-zip");
+    if (exportBtn) exportBtn.textContent = "Packing…";
     try {
       const blob = await exportDrugZip(data, meta.slug);
       downloadBlob(blob, `${meta.slug}-vigiaccess.zip`);
+      if (statusEl) statusEl.textContent = "";
+    } catch (err) {
+      if (statusEl) statusEl.textContent = err instanceof Error ? err.message : String(err);
     } finally {
-      exportBtn.disabled = false;
-      exportBtn.textContent = "Export ZIP";
+      exportBusy = false;
+      if (exportBtn) exportBtn.textContent = "Export ZIP";
+      setCatalogLocked(false);
+      syncSelectionUi([]);
     }
+  };
+
+  const exportBtn = app!.querySelector<HTMLButtonElement>("#export-zip");
+  exportBtn?.addEventListener("click", () => {
+    void exportThisDrug();
   });
+  wireMenu(catalog, exportThisDrug);
 
   const input = app!.querySelector<HTMLInputElement>("#rx-search");
   let timer = 0;
@@ -569,7 +665,7 @@ function paintDrug(meta: CatalogDrug, data: DrugCapture, q: string): void {
     timer = window.setTimeout(() => {
       const next = input.value;
       setRoute({ view: "drug", slug: meta.slug, q: next }, true);
-      paintDrug(meta, data, next);
+      paintDrug(meta, data, next, catalog);
       focusSearch("#rx-search");
     }, 120);
   });
