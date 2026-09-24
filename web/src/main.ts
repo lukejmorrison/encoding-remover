@@ -3,8 +3,11 @@ import type { Catalog, CatalogDrug, DrugCapture, LabeledCount } from "./types";
 import { loadCatalog, loadDrug } from "./types";
 import {
   downloadBlob,
+  exportAllZips,
   exportDrugZip,
+  exportSelectedFolders,
   filterReactions,
+  type ZipEntry,
 } from "./export";
 import { startIngest, waitForIngest } from "./api";
 
@@ -17,8 +20,10 @@ type Route =
 
 let catalogCache: Catalog | null = null;
 const drugCache = new Map<string, DrugCapture>();
+const selectedSlugs = new Set<string>();
 let ingestBusy = false;
 let ingestStatus = "";
+let exportBusy = false;
 
 function invalidateCatalog(): void {
   catalogCache = null;
@@ -199,6 +204,178 @@ function wireAddDrugForm(currentQ: string): void {
   });
 }
 
+function controlsLocked(): boolean {
+  return ingestBusy || exportBusy;
+}
+
+function drugCard(d: CatalogDrug, q: string, index: number): string {
+  const checked = selectedSlugs.has(d.slug) ? "checked" : "";
+  const locked = controlsLocked() ? "disabled" : "";
+  return `
+    <article class="drug-item${checked ? " is-selected" : ""}" style="animation-delay:${0.04 * index}s">
+      <label class="drug-select">
+        <input type="checkbox" class="drug-check" data-slug="${escapeHtml(d.slug)}" ${checked} ${locked} />
+        <span class="visually-hidden">Select ${escapeHtml(d.name)}</span>
+      </label>
+      <button type="button" class="drug-open" data-slug="${escapeHtml(d.slug)}" ${locked}>
+        <div>
+          <h2>${highlight(d.name, q)}</h2>
+          <p class="meta">${formatCount(d.total_reports)} reports · ${d.soc_count} SOCs · ${d.preferred_term_count} terms · dataset ${escapeHtml(d.dataset_date ?? "—")}</p>
+        </div>
+        <div class="count">${formatCount(d.total_reports)}</div>
+      </button>
+    </article>`;
+}
+
+function exportBar(catalogCount: number): string {
+  if (!catalogCount) return "";
+  const locked = controlsLocked() ? "disabled" : "";
+  const selectedCount = selectedSlugs.size;
+  const countLabel = selectedCount === 1 ? "1 selected" : `${selectedCount} selected`;
+  return `
+    <div class="export-bar">
+      <label class="check">
+        <input type="checkbox" id="select-all" ${locked} />
+        Select shown
+      </label>
+      <span class="export-count" id="export-count">${countLabel}</span>
+      <div class="export-actions">
+        <button class="primary" type="button" id="export-selected" ${locked || selectedCount === 0 ? "disabled" : ""}>Export as ZIP</button>
+        <button class="ghost" type="button" id="export-all-zips" ${locked}>Download all ZIPs</button>
+      </div>
+      <p class="export-help">Download every drug ZIP in one archive, or tick drugs and export them as folders inside a single ZIP.</p>
+      <p id="export-status" class="export-status"></p>
+    </div>
+  `;
+}
+
+function syncSelectionUi(visibleSlugs: string[]): void {
+  const checks = app!.querySelectorAll<HTMLInputElement>(".drug-check");
+  checks.forEach((el) => {
+    const slug = el.dataset.slug ?? "";
+    const on = selectedSlugs.has(slug);
+    el.checked = on;
+    el.closest(".drug-item")?.classList.toggle("is-selected", on);
+  });
+  const visibleSelected = visibleSlugs.filter((slug) => selectedSlugs.has(slug)).length;
+  const selectAll = app!.querySelector<HTMLInputElement>("#select-all");
+  if (selectAll) {
+    selectAll.checked = visibleSlugs.length > 0 && visibleSelected === visibleSlugs.length;
+    selectAll.indeterminate = visibleSelected > 0 && visibleSelected < visibleSlugs.length;
+  }
+  const count = app!.querySelector("#export-count");
+  if (count) {
+    const n = selectedSlugs.size;
+    count.textContent = n === 1 ? "1 selected" : `${n} selected`;
+  }
+  const selectedBtn = app!.querySelector<HTMLButtonElement>("#export-selected");
+  if (selectedBtn && !exportBusy) selectedBtn.disabled = selectedSlugs.size === 0 || ingestBusy;
+}
+
+function setCatalogLocked(locked: boolean): void {
+  app!.querySelectorAll<HTMLInputElement>(
+    "#catalog-search, #select-all, .drug-check, #add-drug-form input",
+  ).forEach((el) => {
+    el.disabled = locked;
+  });
+  app!.querySelectorAll<HTMLButtonElement>(
+    ".drug-open, #export-selected, #export-all-zips, #add-drug-form button",
+  ).forEach((el) => {
+    el.disabled = locked;
+  });
+}
+
+async function loadZipEntries(drugs: CatalogDrug[]): Promise<ZipEntry[]> {
+  return Promise.all(
+    drugs.map(async (drug) => ({
+      slug: drug.slug,
+      data: await getDrug(drug.file),
+    })),
+  );
+}
+
+function wireCatalogExport(catalog: Catalog): void {
+  const visibleSlugs = [
+    ...app!.querySelectorAll<HTMLInputElement>(".drug-check"),
+  ].map((el) => el.dataset.slug ?? "");
+
+  app!.querySelectorAll<HTMLInputElement>(".drug-check").forEach((el) => {
+    el.addEventListener("change", () => {
+      const slug = el.dataset.slug ?? "";
+      if (el.checked) selectedSlugs.add(slug);
+      else selectedSlugs.delete(slug);
+      syncSelectionUi(visibleSlugs);
+    });
+  });
+
+  app!.querySelector<HTMLInputElement>("#select-all")?.addEventListener("change", (ev) => {
+    const checked = (ev.currentTarget as HTMLInputElement).checked;
+    for (const slug of visibleSlugs) {
+      if (checked) selectedSlugs.add(slug);
+      else selectedSlugs.delete(slug);
+    }
+    syncSelectionUi(visibleSlugs);
+  });
+
+  const statusEl = app!.querySelector<HTMLParagraphElement>("#export-status");
+
+  const run = async (
+    button: HTMLButtonElement,
+    idleLabel: string,
+    drugs: CatalogDrug[],
+    pack: (entries: ZipEntry[], onProgress: (done: number, total: number) => void) => Promise<Blob>,
+    filename: string,
+  ) => {
+    if (exportBusy || ingestBusy || drugs.length === 0) return;
+    exportBusy = true;
+    setCatalogLocked(true);
+    button.disabled = true;
+    button.textContent = "Loading…";
+    if (statusEl) statusEl.textContent = "";
+    try {
+      const entries = await loadZipEntries(drugs);
+      const blob = await pack(entries, (done, total) => {
+        button.textContent = `Packing ${done}/${total}…`;
+      });
+      downloadBlob(blob, filename);
+    } catch (err) {
+      if (statusEl) {
+        statusEl.textContent = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      exportBusy = false;
+      button.textContent = idleLabel;
+      setCatalogLocked(false);
+      syncSelectionUi(visibleSlugs);
+    }
+  };
+
+  const selectedBtn = app!.querySelector<HTMLButtonElement>("#export-selected");
+  selectedBtn?.addEventListener("click", () => {
+    if (!selectedBtn) return;
+    const drugs = catalog.drugs.filter((drug) => selectedSlugs.has(drug.slug));
+    void run(
+      selectedBtn,
+      "Export as ZIP",
+      drugs,
+      (entries) => exportSelectedFolders(entries),
+      "vigiaccess-export.zip",
+    );
+  });
+
+  const allBtn = app!.querySelector<HTMLButtonElement>("#export-all-zips");
+  allBtn?.addEventListener("click", () => {
+    if (!allBtn) return;
+    void run(
+      allBtn,
+      "Download all ZIPs",
+      catalog.drugs,
+      (entries, onProgress) => exportAllZips(entries, onProgress),
+      "vigiaccess-all-zips.zip",
+    );
+  });
+}
+
 async function renderHome(q: string): Promise<void> {
   if (!catalogCache && !ingestBusy) {
     app!.innerHTML = `
@@ -214,22 +391,14 @@ async function renderHome(q: string): Promise<void> {
       ${addDrugPanel()}
       <div class="search-shell">
         <label for="catalog-search">Search drugs</label>
-        <input id="catalog-search" type="search" placeholder="e.g. Liraglutide" value="${escapeHtml(q)}" autocomplete="off" ${ingestBusy ? "disabled" : ""} />
+        <input id="catalog-search" type="search" placeholder="e.g. Liraglutide" value="${escapeHtml(q)}" autocomplete="off" ${controlsLocked() ? "disabled" : ""} />
       </div>
+      ${exportBar(catalog.drugs.length)}
       <div class="drug-grid" id="drug-grid">
         ${
           drugs.length
             ? drugs
-                .map(
-                  (d, i) => `
-            <button class="drug-item" data-slug="${escapeHtml(d.slug)}" style="animation-delay:${0.04 * i}s" ${ingestBusy ? "disabled" : ""}>
-              <div>
-                <h2>${highlight(d.name, q)}</h2>
-                <p class="meta">${formatCount(d.total_reports)} reports · ${d.soc_count} SOCs · ${d.preferred_term_count} terms · dataset ${escapeHtml(d.dataset_date ?? "—")}</p>
-              </div>
-              <div class="count">${formatCount(d.total_reports)}</div>
-            </button>`,
-                )
+                .map((d, i) => drugCard(d, q, i))
                 .join("")
             : `<p class="empty">No drugs match “${escapeHtml(q)}”. Use <strong>Add a drug</strong> above to ingest one.</p>`
         }
@@ -238,6 +407,9 @@ async function renderHome(q: string): Promise<void> {
 
     wireAddDrugForm(q);
 
+    wireCatalogExport(catalog);
+    syncSelectionUi(drugs.map((d) => d.slug));
+
     const input = app!.querySelector<HTMLInputElement>("#catalog-search");
     input?.addEventListener("input", () => {
       const next = input.value;
@@ -245,9 +417,9 @@ async function renderHome(q: string): Promise<void> {
       void renderHome(next).then(() => focusSearch("#catalog-search"));
     });
 
-    app!.querySelectorAll<HTMLButtonElement>(".drug-item").forEach((btn) => {
+    app!.querySelectorAll<HTMLButtonElement>(".drug-open").forEach((btn) => {
       btn.addEventListener("click", () => {
-        if (ingestBusy) return;
+        if (controlsLocked()) return;
         const slug = btn.dataset.slug!;
         setRoute({ view: "drug", slug, q: "" });
         void renderDrug(slug, "");
