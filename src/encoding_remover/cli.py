@@ -17,6 +17,8 @@ from encoding_remover.decode import (
     unpack_msgpack,
 )
 from encoding_remover.export import write_csv_bundle, write_json
+from encoding_remover.ingest import DEFAULT_DATA_DIR, ingest_capture
+from encoding_remover.serve import serve as serve_app
 
 app = typer.Typer(
     name="encoding-remover",
@@ -49,6 +51,11 @@ def capture(
         "--delay",
         help="Seconds between primaryTerm page requests",
     ),
+    ingest: bool = typer.Option(
+        False,
+        "--ingest",
+        help="Also copy the capture into data/ for the PWA catalog",
+    ),
 ) -> None:
     """Search VigiAccess and export clean decoded metadata."""
     with VigiAccessClient(page_delay_s=delay) as client:
@@ -56,6 +63,7 @@ def capture(
             query, include_preferred_terms=not no_preferred_terms
         )
 
+    written_path: Path
     if csv:
         out_dir = output if output.suffix == "" or output.is_dir() else output.parent / output.stem
         if output.suffix.lower() == ".json":
@@ -67,12 +75,18 @@ def capture(
         typer.echo(f"Wrote {json_path}")
         for p in paths:
             typer.echo(f"Wrote {p}")
+        written_path = json_path
     else:
         write_json(output, data)
         typer.echo(
             f"Wrote {output} — {data['drug']['name']}: "
             f"{data['total_reports']} reports, {len(data['reactions'])} SOCs"
         )
+        written_path = output
+
+    if ingest:
+        entry = ingest_capture(written_path, DEFAULT_DATA_DIR)
+        typer.echo(f"Ingested → data/{entry['file']} ({entry['slug']})")
 
 
 @app.command("search")
@@ -113,6 +127,40 @@ def decode_file(
     else:
         out = payload
     typer.echo(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+
+
+@app.command("ingest")
+def ingest_cmd(
+    source: Path = typer.Argument(
+        ...,
+        help="Capture JSON file or directory containing capture.json",
+    ),
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR,
+        "--data-dir",
+        help="Catalog root (contains catalog.json + drugs/)",
+    ),
+    slug: Optional[str] = typer.Option(
+        None,
+        "--slug",
+        help="Override URL slug (default: slugified drug name)",
+    ),
+) -> None:
+    """Add a capture file to the PWA data catalog."""
+    entry = ingest_capture(source, data_dir, slug=slug)
+    typer.echo(
+        f"Ingested {entry['name']}: {entry['total_reports']} reports → data/{entry['file']}"
+    )
+
+
+@app.command("serve")
+def serve_cmd(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(4173, "--port"),
+    no_open: bool = typer.Option(False, "--no-open", help="Do not open a browser"),
+) -> None:
+    """Serve the built PWA and ingested data/ directory."""
+    serve_app(host=host, port=port, open_browser=not no_open)
 
 
 def main() -> None:

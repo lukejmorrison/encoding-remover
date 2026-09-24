@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "drugs": [
+    {
+      "slug": "influenza-vaccine",
+      "name": "Influenza vaccine",
+      "trade_name": null,
+      "total_reports": 349728,
+      "dataset_date": "2026-09-20",
+      "retrieved_at": "2026-09-24T02:31:24.633867+00:00",
+      "soc_count": 27,
+      "preferred_term_count": 8501,
+      "brand_count": 18,
+      "file": "drugs/influenza-vaccine.json"
+    },
+    {
+      "slug": "liraglutide",
+      "name": "Liraglutide",
+      "trade_name": null,
+      "total_reports": 76240,
+      "dataset_date": "2026-09-20",
+      "retrieved_at": "2026-09-24T01:43:55.250813+00:00",
+      "soc_count": 27,
+      "preferred_term_count": 4172,
+      "brand_count": 9,
+      "file": "drugs/liraglutide.json"
+    },
+    {
+      "slug": "nirmatrelvir-ritonavir",
+      "name": "Nirmatrelvir;Ritonavir",
+      "trade_name": "Paxlovid",
+      "total_reports": 58198,
+      "dataset_date": "2026-09-20",
+      "retrieved_at": "2026-09-24T02:29:27.909345+00:00",
+      "soc_count": 27,
+      "preferred_term_count": 2650,
+      "brand_count": 7,
+      "file": "drugs/nirmatrelvir-ritonavir.json"
+    },
+    {
+      "slug": "omeprazole",
+      "name": "Omeprazole",
+      "trade_name": null,
+      "total_reports": 147316,
+      "dataset_date": "2026-09-20",
+      "retrieved_at": "2026-09-24T02:24:36.945773+00:00",
+      "soc_count": 27,
+      "preferred_term_count": 6082,
+      "brand_count": 16,
+      "file": "drugs/omeprazole.json"
+    }
+  ]
+}

@@ -7,5 +7,9 @@ dist/
 build/
 out/
 .eggs/
+web/node_modules/
+web/dist/
+.playwright-cli/
 *.msgpack
 !tests/fixtures/*.msgpack
+
