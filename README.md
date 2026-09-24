@@ -9,7 +9,7 @@ Decode VigiAccess’s “hidden encoding”, browse adverse-reaction captures in
 **Live demo:** [https://chunder.wizwam.com/](https://chunder.wizwam.com/)
 
 <p align="center">
-  <img src="docs/screenshots/01-catalog.png" width="820" alt="Catalog with Add a drug and search" />
+  <img src="docs/screenshots/04-homepage.avif" width="800" alt="Catalog with Add a drug, search and export" />
 </p>
 
 <p align="center"><em>Ingest new drugs from the web UI, search the catalog, open any capture.</em></p>
